@@ -1,0 +1,440 @@
+// Pod install 
+pod 'Alamofire', '~> 4.7.0'
+
+// client Id and key 
+pod 'BCryptSwift', '~> 1.0'
+
+import Alamofire
+import BCryptSwift
+
+class APIClient: NSObject, NSURLConnectionDataDelegate {
+    
+    class var sharedInstance: APIClient {
+        
+        struct Static {
+            static let instance: APIClient = APIClient()
+        }
+        return Static.instance
+    }
+    
+    //----------------------------- for Login ----------------------------- 
+    
+    func MakeLoginAPICall(email: String, password: String, completionHandler:@escaping (NSDictionary?, Error?, Int?) -> Void) {
+    
+        let parameters = ["emailaddress": email, "password": password]
+        
+        UserDefaults.standard.set(email, forKey: "currentUserEmail")
+        UserDefaults.standard.set(password, forKey: "currentUserPassword")
+        UserDefaults.standard.synchronize()
+        
+        if NetConnection.isConnectedToNetwork() == true {
+        
+        let salt = BCryptSwift.generateSaltWithNumberOfRounds(10)
+
+            let obfuscstorId = Obfuscator(withSalt: [AppDelegate.self, NSObject.self, NSString.self])
+            let clientSecret = obfuscstorId.reveal(key: CLIENT_API_SECRET)
+            print(clientSecret)
+
+            if let authcode = BCryptSwift.hashPassword(email+password+clientSecret, withSalt: salt)
+            {
+                
+            let obfuscstorId = Obfuscator(withSalt: [AppDelegate.self, NSObject.self, NSString.self])
+            let clientId = obfuscstorId.reveal(key: CLIENT_API_ID)
+            print(clientId)
+
+            let credentialData = "\(clientId):\(authcode)".data(using: String.Encoding.utf8)!
+            let base64Credentials = credentialData.base64EncodedString(options: [])
+            let headers = ["Authorization": "Basic \(base64Credentials)"]
+            
+            Alamofire.request(BASE_URL + USER_LOGIN, method: .post, parameters: parameters, encoding: URLEncoding(destination: .httpBody), headers: headers).responseJSON { response in
+                
+                switch(response.result) {
+                    
+                case .success:
+                    if response.result.value != nil{
+                      if let responseDict = ((response.result.value as AnyObject) as? NSDictionary) {
+                        completionHandler(responseDict, nil, response.response?.statusCode)
+                      }
+
+                    }
+
+                    
+                case .failure:
+                    print(response.result.error!)
+                    completionHandler(nil, response.result.error, response.response?.statusCode)
+
+                }
+            }
+            }else
+            {
+                print("Could not generate hash for password")
+            }  
+            
+          }
+        
+    }
+    
+    //----------------------------- for reAuthenticateAndCallAPIAgain ----------------------------- 
+    
+    func reAuthenticateAndCallAPIAgain (completionHandler : @escaping (Bool?, Error?) -> Void) {
+        let username =  UserDefaults.standard.value(forKey: "currentUserEmail") as? String ?? ""
+        
+        let password =  UserDefaults.standard.value(forKey: "currentUserPassword") as? String ?? ""
+        
+        if username == ""
+        {
+            NotificationCenter.default.post(name: Notification.Name("NotificationSignOut"), object: nil)
+        }
+        
+        MakeLoginAPICall(email: username, password: password) { (response, error, statusCode) in
+            if error == nil {
+                
+                if (statusCode == 200)
+                {
+                
+                let token = response?["token"] as? String
+                let expiresat = response?["expiresat"] as? Int
+                
+                AppData.sharedInstance.userAuthToken = token
+                UserDefaults.standard.set(token, forKey: "userAuthToken")
+                   UserDefaults.standard.set(expiresat, forKey: "expiresat")
+                UserDefaults.standard.synchronize()
+                    
+                 completionHandler(true, nil)
+                } else
+                {
+                    completionHandler(false, nil)
+                }
+                
+                
+            } else {
+                // Do Logout as could not generate auth token
+                print("\(String(describing: error?.localizedDescription))")
+
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.1) {
+                    NotificationCenter.default.post(name: Notification.Name("NotificationSignOut"), object: nil)
+                }
+                
+                completionHandler(false, error)
+
+            }
+        }
+        
+    }
+    
+    //----------------------------- for without auth header ----------------------------- 
+    
+    func MakeAPICallWithoutAuthHeader(_ url: String, parameters: [String: Any], completionHandler:@escaping (NSDictionary?, Error?, Int?) -> Void) {
+    
+    if NetConnection.isConnectedToNetwork() == true {
+    
+            Alamofire.request(BASE_URL + url, method: .post, parameters: parameters, encoding: URLEncoding(destination: .httpBody), headers: [:]).responseJSON { response in
+                
+                switch(response.result) {
+                    
+                case .success:
+                    if response.result.value != nil {
+                      if let responseDict = ((response.result.value as AnyObject) as? NSDictionary) {
+                        completionHandler(responseDict, nil, response.response?.statusCode)
+                      }
+
+                    }
+
+                    
+                case .failure:
+                    print(response.result.error!)
+                    
+                    print("Http Status Code: \(String(describing: response.response?.statusCode))")
+                    completionHandler(nil, response.result.error, response.response?.statusCode )
+
+                }
+            }
+            
+          }
+            
+         //----------------------------- for MakeAPICallWithArrayResponse ----------------------------- 
+         
+         func MakeAPICallWithArrayResponse(_ url: String, parameters: [String: Any], completionHandler:@escaping (NSArray?, Error?, Int?) -> Void) {
+                
+                if let authToken = UserDefaults.standard.value(forKey: "userAuthToken") as? String {
+                
+                 let authorizationStr = "Bearer " + authToken
+                 
+                 if NetConnection.isConnectedToNetwork() == true { 
+                                    Alamofire.request(BASE_URL + url, method: .post, parameters: parameters, encoding: URLEncoding(destination: .httpBody), headers: ["Authorization": authorizationStr]).responseJSON { response in
+                
+                switch(response.result) {
+                    
+                case .success:
+                    if response.result.value != nil
+                    {
+//                        print(response.result.value)
+                        if (response.response?.statusCode == 200)
+                        {
+                            if let responseArray = response.result.value as? NSArray
+                            {
+                                completionHandler(responseArray, nil, response.response?.statusCode)
+                            }
+                            else
+                            {
+                                let responseArr = NSArray()
+                                completionHandler(responseArr, nil, response.response?.statusCode)
+                            }
+                        }else
+                        {
+                          if let responseDict = ((response.result.value as AnyObject) as? NSDictionary) {
+                            let responseArray: NSArray = [responseDict]
+                            completionHandler(responseArray, nil, response.response?.statusCode)
+                          }
+
+                        }
+                    }
+
+                    
+                case .failure:
+                    print(response.result.error!)
+                    
+                    print("Http Status Code: \(String(describing: response.response?.statusCode))")
+                    completionHandler(nil, response.result.error, response.response?.statusCode )
+
+                }
+            }
+
+                }
+         }
+       }
+    } else {
+        reAuthenticateAndCallAPIAgain { (_, _) in
+    }
+ }
+ 
+ //----------------------------- for MakePostAPICallWithEndURl ----------------------------- 
+ 
+ func MakePostAPICallWithEndURl(_ url: String, parameters: [String: Any], completionHandler:@escaping (NSDictionary?, Error?, Int?) -> Void) {
+ 
+ if let authToken = UserDefaults.standard.value(forKey: "userAuthToken") as? String
+    {
+      
+      let authorizationStr = "Bearer " + authToken
+      
+      if NetConnection.isConnectedToNetwork() == true
+      {
+        
+        Alamofire.request(BASE_URL + url, method: .post, parameters: parameters, encoding: URLEncoding(destination: .httpBody), headers: ["Authorization": authorizationStr]).responseJSON { response in
+          
+          switch(response.result) {
+            
+          case .success:
+            if response.result.value != nil {
+              if let responseDict = ((response.result.value as AnyObject) as? NSDictionary) {
+                completionHandler(responseDict, nil, response.response?.statusCode)
+              }
+              
+            }
+            
+            
+          case .failure:
+            print(response.result.error!)
+            print("Http Status Code:\(String(describing: response.response?.statusCode))")
+            completionHandler(nil, response.result.error, response.response?.statusCode )
+            
+          }
+        }
+        
+      }
+      
+    }
+    
+ }
+ 
+ //----------------------------- for postProfileImageToServer ----------------------------- 
+ 
+ 
+   func postProfileImageToServer(_ url: String, image: UIImage!, parameters: [String: Any], completionHandler:@escaping (NSDictionary?, Error?, Int?) -> Void){
+
+    let finalUrl = BASE_URL + url
+    print("Requesting \(finalUrl)")
+    print("Parameters: \(parameters)")
+
+    let imageData = UIImageJPEGRepresentation(image!, 1)
+
+    if let authToken = UserDefaults.standard.value(forKey: "userAuthToken") as? String
+    {
+
+      let authorizationStr = "Bearer " + authToken
+
+      if NetConnection.isConnectedToNetwork() == true
+      {
+
+        if (imageData != nil)
+        {
+
+          let headers: HTTPHeaders = [
+            /* "Authorization": "your_access_token",  in case you need authorization header */
+            "Content-type": "multipart/form-data",
+            "Authorization": authorizationStr
+          ]
+
+          Alamofire.upload(multipartFormData: { (multipartFormData) in
+            for (key, value) in parameters {
+              multipartFormData.append("\(value)".data(using: String.Encoding.utf8)!, withName: key as String)
+            }
+            multipartFormData.append(imageData!, withName: "photofile", fileName: "photo.jpg", mimeType: "image/jpeg")
+
+          }, usingThreshold: UInt64.init(), to: finalUrl, method: .post, headers: headers) { (result) in
+            switch result{
+            case .success(let upload, _, _):
+              upload.responseJSON { response in
+                print("Succesfully uploaded")
+                if let err = response.error{
+                  completionHandler(nil, err, response.response?.statusCode )
+
+                  return
+                }
+                if let responseDict = ((response.result.value as AnyObject) as? NSDictionary) {
+                  completionHandler(responseDict, nil, response.response?.statusCode)
+                }
+
+
+              }
+            case .failure(let error):
+              print("Error in upload: \(error.localizedDescription)")
+              completionHandler(nil, error, -1 )
+            }
+          }
+        }
+      }
+    }
+  }
+    
+    
+     //----------------------------- for postImageToServer ----------------------------- 
+    
+    func postImageToServer(_ url: String, image: UIImage!, parameters: [String: Any], completionHandler:@escaping (NSDictionary?, Error?, Int?) -> Void){
+        
+        let finalUrl = BASE_URL + url
+        print("Requesting \(finalUrl)")
+        print("Parameters: \(parameters)")
+        
+        let imageData = UIImageJPEGRepresentation(image!, 0.1)
+        
+        if let authToken = UserDefaults.standard.value(forKey: "userAuthToken") as? String
+        {
+            
+        let authorizationStr = "Bearer " + authToken
+        
+            if NetConnection.isConnectedToNetwork() == true
+            {
+                //        let imageData  = UIImagePNGRepresentation(image)
+                
+                if (imageData != nil)
+                {
+                    
+                    let headers: HTTPHeaders = [
+                        /* "Authorization": "your_access_token",  in case you need authorization header */
+                        "Content-type": "multipart/form-data",
+                        "Authorization": authorizationStr
+                    ]
+                    
+                    Alamofire.upload(multipartFormData: { (multipartFormData) in
+                        for (key, value) in parameters {
+                            multipartFormData.append("\(value)".data(using: String.Encoding.utf8)!, withName: key as String)
+                        }
+                        multipartFormData.append(imageData!, withName: "fileupload", fileName: "photo.jpg", mimeType: "image/jpeg")
+                        
+                    }, usingThreshold: UInt64.init(), to: finalUrl, method: .post, headers: headers) { (result) in
+                        switch result{
+                        case .success(let upload, _, _):
+                            upload.responseJSON { response in
+                                print("Succesfully uploaded")
+                                if let err = response.error{
+                                    completionHandler(nil, err, response.response?.statusCode)
+                                    
+                                    return
+                                }
+                              if let responseDict = ((response.result.value as AnyObject) as? NSDictionary) {
+                                completionHandler(responseDict, nil, response.response?.statusCode)
+                              }
+
+                                
+                            }
+                            upload.uploadProgress(closure: { (progrress) in
+                                print(progrress.fractionCompleted)
+                            })
+                        case .failure(let error):
+                            print("Error in upload: \(error.localizedDescription)")
+                            completionHandler(nil, error, -1 )
+                        }
+                    }
+                }
+            }
+    }
+}
+    
+    //----------------------------- for postVideoToServer -----------------------------
+    
+    
+    func postVideoToServer(_ url: String, videoURL: URL!, parameters: [String: Any], completionHandler:@escaping (NSDictionary?, Error?, Int?) -> Void){
+        
+        let finalUrl = BASE_URL + url
+        print("Requesting \(finalUrl)")
+        print("Parameters: \(parameters)")
+        print("videoURL :\(videoURL)")
+        
+//        let imageData = UIImageJPEGRepresentation(UIImage(named: "")!, 0.1)
+        
+        if let authToken = UserDefaults.standard.value(forKey: "userAuthToken") as? String
+        {
+            
+        let authorizationStr = "Bearer " + authToken
+            
+            if NetConnection.isConnectedToNetwork() == true
+            {
+                
+                if (videoURL != nil)
+                {
+                    
+                    let headers: HTTPHeaders = [
+                        /* "Authorization": "your_access_token",  in case you need authorization header */
+                        "Content-type": "multipart/form-data",
+                        "Authorization": authorizationStr
+                    ]
+                    
+                    Alamofire.upload(multipartFormData: { (multipartFormData) in
+                        for (key, value) in parameters {
+                            multipartFormData.append("\(value)".data(using: String.Encoding.utf8)!, withName: key as String)
+                        }
+                        multipartFormData.append(videoURL, withName: "fileupload", fileName: "video.mov", mimeType: "video/quicktime")
+                        
+                        // multipartFormData.append(videoURL, withName: "fileupload")
+                        
+                    }, usingThreshold: UInt64.init(), to: finalUrl, method: .post, headers: headers) { (result) in
+                        switch result{
+                        case .success(let upload, _, _):
+                            upload.responseJSON { response in
+                                print("Succesfully uploaded")
+                                if let err = response.error{
+                                    completionHandler(nil, err, response.response?.statusCode)
+                                    
+                                    return
+                                }
+                              if let responseDict = ((response.result.value as AnyObject) as? NSDictionary) {
+                                 completionHandler(responseDict, nil, response.response?.statusCode)
+                              }
+
+                                
+                            }
+                        case .failure(let error):
+                            print("Error in upload: \(error.localizedDescription)")
+                            completionHandler(nil, error, -1 )
+                        }
+                    }
+                }
+            }
+    }
+    }
+
+    
+
+
+}
